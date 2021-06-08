@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
+
 	v1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -12,13 +14,9 @@ import (
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
-	clientcache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/kubernetes/pkg/scheduler"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/profile"
-	"sync"
-	"time"
 )
 
 func main() {
@@ -26,76 +24,107 @@ func main() {
 	node1 := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node1",
-			UID: types.UID("node1"),
+			UID:  types.UID("node1"),
 		},
-		Spec:       v1.NodeSpec{},
-		Status:     v1.NodeStatus{
+		Spec: v1.NodeSpec{},
+		Status: v1.NodeStatus{
 			Capacity: v1.ResourceList{
-				v1.ResourceCPU: *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
 				v1.ResourceMemory: *(resource.NewQuantity(20480, resource.DecimalSI)),
-				v1.ResourcePods: *(resource.NewQuantity(10, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
 			},
 			Allocatable: v1.ResourceList{
-				v1.ResourceCPU: *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
 				v1.ResourceMemory: *(resource.NewQuantity(1024, resource.DecimalSI)),
-				v1.ResourcePods: *(resource.NewQuantity(10, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
 			},
 		},
 	}
-	// Node 1  enough memory
+	// Node 2  enough memory - taints
 	node2 := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node2",
-			UID: types.UID("node2"),
+			UID:  types.UID("node2"),
 		},
-		Spec:       v1.NodeSpec{},
-		Status:     v1.NodeStatus{
-			Capacity: v1.ResourceList{
-				v1.ResourceCPU: *(resource.NewQuantity(16, resource.DecimalSI)),
-				v1.ResourceMemory: *(resource.NewQuantity(20480, resource.DecimalSI)),
-				v1.ResourcePods: *(resource.NewQuantity(10, resource.DecimalSI)),
-			},
-			Allocatable: v1.ResourceList{
-				v1.ResourceCPU: *(resource.NewQuantity(16, resource.DecimalSI)),
-				v1.ResourceMemory: *(resource.NewQuantity(8192, resource.DecimalSI)),
-				v1.ResourcePods: *(resource.NewQuantity(10, resource.DecimalSI)),
-			},
-		},
-	}
-
-	vmPod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:                       "vm1",
-			Namespace: "default",
-			UID:                        types.UID("vm1"),
-		},
-		Spec:       v1.PodSpec{
-			NodeName: "",
-			SchedulerName: "default-scheduler",
-			Containers: []v1.Container{
+		Spec: v1.NodeSpec{
+			Taints: []v1.Taint{
 				{
-					Name: "vm",
-					Resources: v1.ResourceRequirements{
-						Limits:   v1.ResourceList{
-							v1.ResourceCPU: *(resource.NewQuantity(2, resource.DecimalSI)),
-							v1.ResourceMemory: *(resource.NewQuantity(2048, resource.DecimalSI)),
-						},
-						Requests: v1.ResourceList{
-							v1.ResourceCPU: *(resource.NewQuantity(2, resource.DecimalSI)),
-							v1.ResourceMemory: *(resource.NewQuantity(2048, resource.DecimalSI)),
-						},
-					},
+					Key:    "system-apps",
+					Value:  "true",
+					Effect: "NoSchedule",
 				},
 			},
 		},
+		Status: v1.NodeStatus{
+			Capacity: v1.ResourceList{
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceMemory: *(resource.NewQuantity(20480, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
+			},
+			Allocatable: v1.ResourceList{
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceMemory: *(resource.NewQuantity(8192, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
+			},
+		},
 	}
 
-	queuedPodStore := clientcache.NewFIFO(clientcache.MetaNamespaceKeyFunc)
-	queuedPodStore.Add(vmPod)
+	// Node 3  enough memory - no taints
+	node3 := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node3",
+			UID:  types.UID("node3"),
+			Labels: map[string]string{
+				"failure-domain": "1",
+			},
+		},
+		Spec: v1.NodeSpec{},
+		Status: v1.NodeStatus{
+			Capacity: v1.ResourceList{
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceMemory: *(resource.NewQuantity(20480, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
+			},
+			Allocatable: v1.ResourceList{
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceMemory: *(resource.NewQuantity(8192, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
+			},
+		},
+	}
 
-	objs := []runtime.Object{node1, node2, vmPod}
+	// Node 4  enough memory - no taints
+	node4 := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node4",
+			UID:  types.UID("node4"),
+			Labels: map[string]string{
+				"failure-domain": "rack-1",
+			},
+		},
+		Spec: v1.NodeSpec{},
+		Status: v1.NodeStatus{
+			Capacity: v1.ResourceList{
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceMemory: *(resource.NewQuantity(20480, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
+			},
+			Allocatable: v1.ResourceList{
+				v1.ResourceCPU:    *(resource.NewQuantity(16, resource.DecimalSI)),
+				v1.ResourceMemory: *(resource.NewQuantity(8192, resource.DecimalSI)),
+				v1.ResourcePods:   *(resource.NewQuantity(10, resource.DecimalSI)),
+			},
+		},
+	}
 
-	client := clientsetfake.NewSimpleClientset(objs...)
+	vmPods := []*v1.Pod{
+		createPod("vm1"),
+		createPod("vm2"),
+	}
+
+	nodes := []runtime.Object{node1, node2, node3, node4}
+
+	client := clientsetfake.NewSimpleClientset(nodes...)
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
 	eventBroadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: client.EventsV1()})
 
@@ -103,7 +132,7 @@ func main() {
 	defer cancel()
 
 	//validRegistry := map[string]frameworkruntime.PluginFactory{
-	//	"Foo": defaultbinder.New,
+	//	"micro-vm": defaultbinder.New,
 	//}
 
 	s, err := scheduler.New(client,
@@ -115,12 +144,8 @@ func main() {
 		panic(err)
 	}
 
-	s.NextPod = func() *framework.QueuedPodInfo {
-		return &framework.QueuedPodInfo{Pod: clientcache.Pop(queuedPodStore).(*v1.Pod)}
-	}
-
 	var wg sync.WaitGroup
-	numPods := 1
+	numPods := len(vmPods)
 	wg.Add(2 * numPods) // Num pods
 	bindings := make(map[string]string)
 	client.PrependReactor("create", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
@@ -148,27 +173,14 @@ func main() {
 	informerFactory.Start(ctx.Done())
 	informerFactory.WaitForCacheSync(ctx.Done())
 
-	go func() {
-		for {
-			pods, err := client.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
-			if err != nil {
-				fmt.Errorf("error getting pods")
-			} else {
-				for _, pod := range pods.Items {
-					fmt.Printf("Pods %s scheduled on node %s\n", pod.Name, pod.Spec.NodeName)
-				}
-			}
-			time.Sleep(2 * time.Second)
-		}
-	}()
-
-
 	go s.Run(ctx)
 
-	//_, err = client.CoreV1().Pods("").Create(ctx, vmPod, metav1.CreateOptions{})
-	//if err != nil {
-	//	panic(err)
-	//}
+	for _, pod := range vmPods {
+		_, err = client.CoreV1().Pods("default").Create(ctx, pod, metav1.CreateOptions{})
+		if err != nil {
+			panic(err)
+		}
+	}
 
 	wg.Wait()
 
@@ -177,10 +189,39 @@ func main() {
 		fmt.Errorf("error getting pods")
 	} else {
 		for _, pod := range pods.Items {
-			fmt.Printf("Pods %s scheduled on node %s\n", pod.Name, pod.Spec.NodeName)
+			fmt.Printf("%s scheduled on node %s\n", pod.Name, bindings[pod.Name])
 		}
 	}
 
 	fmt.Println("Finished")
 
+}
+
+func createPod(name string) *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			UID:       types.UID(name),
+		},
+		Spec: v1.PodSpec{
+			NodeName:      "",
+			SchedulerName: "default-scheduler",
+			Containers: []v1.Container{
+				{
+					Name: "vm",
+					Resources: v1.ResourceRequirements{
+						Limits: v1.ResourceList{
+							v1.ResourceCPU:    *(resource.NewQuantity(2, resource.DecimalSI)),
+							v1.ResourceMemory: *(resource.NewQuantity(2048, resource.DecimalSI)),
+						},
+						Requests: v1.ResourceList{
+							v1.ResourceCPU:    *(resource.NewQuantity(2, resource.DecimalSI)),
+							v1.ResourceMemory: *(resource.NewQuantity(2048, resource.DecimalSI)),
+						},
+					},
+				},
+			},
+		},
+	}
 }
