@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
@@ -11,6 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic/dynamicinformer"
+	dyfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
@@ -124,8 +127,12 @@ func main() {
 
 	nodes := []runtime.Object{node1, node2, node3, node4}
 
+	defaultResync := 5 * time.Minute
+	scheme := runtime.NewScheme()
 	client := clientsetfake.NewSimpleClientset(nodes...)
+	dynClient := dyfake.NewSimpleDynamicClient(scheme)
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
+	dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynClient, defaultResync)
 	eventBroadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: client.EventsV1()})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -135,10 +142,10 @@ func main() {
 	//	"micro-vm": defaultbinder.New,
 	//}
 
-	s, err := scheduler.New(client,
+	s, err := scheduler.New(ctx, client,
 		informerFactory,
+		dynamicInformerFactory,
 		profile.NewRecorderFactory(eventBroadcaster),
-		ctx.Done(),
 	)
 	if err != nil {
 		panic(err)
@@ -159,7 +166,7 @@ func main() {
 		return true, binding, nil
 	})
 	controllers := make(map[string]string)
-	stopFn := eventBroadcaster.StartEventWatcher(func(obj runtime.Object) {
+	stopFn, err := eventBroadcaster.StartEventWatcher(func(obj runtime.Object) {
 		e, ok := obj.(*eventsv1.Event)
 		if !ok || e.Reason != "Scheduled" {
 			return
@@ -168,6 +175,9 @@ func main() {
 		controllers[e.Regarding.Name] = e.ReportingController
 		wg.Done()
 	})
+	if err != nil {
+		panic(err)
+	}
 	defer stopFn()
 
 	informerFactory.Start(ctx.Done())
@@ -194,7 +204,6 @@ func main() {
 	}
 
 	fmt.Println("Finished")
-
 }
 
 func createPod(name string) *v1.Pod {
